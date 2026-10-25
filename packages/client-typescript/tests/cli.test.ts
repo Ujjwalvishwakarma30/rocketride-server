@@ -38,10 +38,12 @@
 
 import { spawn } from 'child_process';
 import * as fs from 'fs';
+import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from '@jest/globals';
+import { WebSocketServer } from 'ws';
 import { RocketRideClient } from '../src/client';
 import { getEchoPipeline } from './echo.pipeline';
 
@@ -286,6 +288,193 @@ describe('CLI upload Integration Tests', () => {
 
 		expect(code).toBe(1);
 		expect(output).toContain('--max-concurrent must be a positive integer');
+	});
+
+	it('should fail with exit code 1 when uploading to an invalid task token', async () => {
+		const files = writeUploadFiles();
+		const { code, output } = await runCli(['upload', ...files, '--token', 'TASK_DOES_NOT_EXIST', ...serverArgs()]);
+
+		expect(code).toBe(1);
+		expect(output).toContain('Failed: 2 file(s)');
+	});
+});
+
+describe('CLI upload exit codes', () => {
+	let mockServer: { uri: string; close: () => Promise<void> } | null = null;
+
+	afterEach(async () => {
+		if (mockServer) {
+			await mockServer.close();
+			mockServer = null;
+		}
+	});
+
+	function createMockUploadServer(handleOpen: (index: number) => { success: boolean; error?: string }): Promise<{ uri: string; close: () => Promise<void> }> {
+		return new Promise((resolve) => {
+			let openCount = 0;
+			const server = http.createServer();
+			const wss = new WebSocketServer({ server });
+
+			wss.on('connection', (ws) => {
+				ws.on('message', (data) => {
+					let text = data.toString();
+					const nl = text.indexOf('\n');
+					if (nl !== -1) text = text.slice(0, nl);
+					try {
+						const msg = JSON.parse(text);
+						if (msg.type === 'request') {
+							if (msg.command === 'rrext_process' && msg.arguments?.subcommand === 'open') {
+								openCount++;
+								const verdict = handleOpen(openCount);
+								if (verdict.success) {
+									ws.send(
+										JSON.stringify({
+											seq: msg.seq + 100,
+											type: 'response',
+											request_seq: msg.seq,
+											command: msg.command,
+											success: true,
+											body: { token: 'TEST_TOKEN', connection_id: 'c1' },
+										}),
+									);
+								} else {
+									ws.send(
+										JSON.stringify({
+											seq: msg.seq + 100,
+											type: 'response',
+											request_seq: msg.seq,
+											command: msg.command,
+											success: false,
+											message: verdict.error || 'Upload error',
+										}),
+									);
+								}
+							} else {
+								ws.send(
+									JSON.stringify({
+										seq: msg.seq + 100,
+										type: 'response',
+										request_seq: msg.seq,
+										command: msg.command,
+										success: true,
+										body: {},
+									}),
+								);
+							}
+						}
+					} catch {
+						// ignore malformed
+					}
+				});
+			});
+
+			server.listen(0, '127.0.0.1', () => {
+				const address = server.address() as { port: number };
+				resolve({
+					uri: `http://127.0.0.1:${address.port}`,
+					close: () =>
+						new Promise<void>((done) => {
+							wss.close(() => {
+								server.close(() => done());
+							});
+						}),
+				});
+			});
+		});
+	}
+
+	it('should exit with code 0 when all uploads succeed', async () => {
+		mockServer = await createMockUploadServer(() => ({ success: true }));
+		const files = writeUploadFiles();
+
+		const { code, output } = await runCli(['upload', ...files, '--token', 'TEST_TOKEN', '--uri', mockServer.uri, '--apikey', 'TEST']);
+
+		expect(code).toBe(0);
+		expect(output).toContain('Uploaded 2 of 2 file(s)');
+		expect(output).not.toContain('Failed:');
+	});
+
+	it('should exit with nonzero code when all uploads fail', async () => {
+		mockServer = await createMockUploadServer(() => ({ success: false, error: 'Pipeline rejected file' }));
+		const files = writeUploadFiles();
+
+		const { code, output } = await runCli(['upload', ...files, '--token', 'TEST_TOKEN', '--uri', mockServer.uri, '--apikey', 'TEST']);
+
+		expect(code).toBe(1);
+		expect(output).toContain('Uploaded 0 of 2 file(s)');
+		expect(output).toContain('Failed: 2 file(s)');
+	});
+
+	it('should exit with nonzero code when some uploads succeed and others fail (partial success)', async () => {
+		mockServer = await createMockUploadServer((index) => ({
+			success: index === 1,
+			error: index === 1 ? undefined : 'Storage quota exceeded',
+		}));
+		const files = writeUploadFiles();
+
+		const { code, output } = await runCli([
+			'upload',
+			...files,
+			'--token',
+			'TEST_TOKEN',
+			'--max-concurrent',
+			'1',
+			'--uri',
+			mockServer.uri,
+			'--apikey',
+			'TEST',
+		]);
+
+		expect(code).toBe(1);
+		expect(output).toContain('Uploaded 1 of 2 file(s)');
+		expect(output).toContain('Failed: 1 file(s)');
+	});
+
+	it('should preserve JSON report structure and exit with nonzero code on failure', async () => {
+		mockServer = await createMockUploadServer((index) => ({
+			success: index === 1,
+			error: index === 1 ? undefined : 'Storage quota exceeded',
+		}));
+		const files = writeUploadFiles();
+
+		const { code, output } = await runCli([
+			'upload',
+			...files,
+			'--token',
+			'TEST_TOKEN',
+			'--max-concurrent',
+			'1',
+			'--json',
+			'--uri',
+			mockServer.uri,
+			'--apikey',
+			'TEST',
+		]);
+
+		expect(code).toBe(1);
+		const report = JSON.parse(output.trim());
+		expect(report.uploaded).toBe(1);
+		expect(report.failed).toBe(1);
+		expect(report.files).toHaveLength(2);
+		expect(report.files.find((f: { action: string }) => f.action === 'complete')).toBeDefined();
+		expect(report.files.find((f: { action: string }) => f.action === 'error')).toBeDefined();
+	});
+
+	it('should exit with nonzero code when server connection fails', async () => {
+		const files = writeUploadFiles();
+		const { code, output } = await runCli([
+			'upload',
+			...files,
+			'--token',
+			'TEST_TOKEN',
+			'--uri',
+			'http://127.0.0.1:9',
+			'--apikey',
+			'TEST',
+		]);
+
+		expect(code).toBe(1);
+		expect(output).toContain('Failed to connect');
 	});
 });
 
