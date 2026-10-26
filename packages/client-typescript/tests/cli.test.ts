@@ -478,6 +478,239 @@ describe('CLI upload exit codes', () => {
 	});
 });
 
+describe('CLI start and pipeline loading regression tests (Issue #2830)', () => {
+	let mockServer: { uri: string; close: () => Promise<void> } | null = null;
+
+	afterEach(async () => {
+		if (mockServer) {
+			await mockServer.close();
+			mockServer = null;
+		}
+	});
+
+	function createMockStartServer(): Promise<{ uri: string; close: () => Promise<void> }> {
+		return new Promise((resolve) => {
+			const server = http.createServer();
+			const wss = new WebSocketServer({ server });
+
+			wss.on('connection', (ws) => {
+				ws.on('message', (data) => {
+					let text = data.toString();
+					const nl = text.indexOf('\n');
+					if (nl !== -1) text = text.slice(0, nl);
+					try {
+						const msg = JSON.parse(text);
+						if (msg.type === 'request') {
+							if (msg.command === 'auth') {
+								ws.send(
+									JSON.stringify({
+										seq: msg.seq + 100,
+										type: 'response',
+										request_seq: msg.seq,
+										command: msg.command,
+										success: true,
+										body: { userToken: 'MOCK_TOKEN' },
+									}),
+								);
+							} else if (msg.command === 'execute' || msg.command === 'rrext_use') {
+								ws.send(
+									JSON.stringify({
+										seq: msg.seq + 100,
+										type: 'response',
+										request_seq: msg.seq,
+										command: msg.command,
+										success: true,
+										body: { token: 'MOCK-TASK-TOKEN-98765' },
+									}),
+								);
+							} else if (msg.command === 'rrext_process' && msg.arguments?.subcommand === 'open') {
+								ws.send(
+									JSON.stringify({
+										seq: msg.seq + 100,
+										type: 'response',
+										request_seq: msg.seq,
+										command: msg.command,
+										success: true,
+										body: { token: 'MOCK-TASK-TOKEN-98765', connection_id: 'c1' },
+									}),
+								);
+							} else {
+								ws.send(
+									JSON.stringify({
+										seq: msg.seq + 100,
+										type: 'response',
+										request_seq: msg.seq,
+										command: msg.command,
+										success: true,
+										body: {},
+									}),
+								);
+							}
+						}
+					} catch {
+						// ignore
+					}
+				});
+			});
+
+			server.listen(0, '127.0.0.1', () => {
+				const address = server.address() as { port: number };
+				resolve({
+					uri: `ws://127.0.0.1:${address.port}`,
+					close: () =>
+						new Promise((res) => {
+							wss.close(() => server.close(() => res()));
+						}),
+				});
+			});
+		});
+	}
+
+	it('should display string token and not leak apikey or print [object Object]', async () => {
+		mockServer = await createMockStartServer();
+		const pipelinePath = writePipeline('start-test-project');
+		const secretApiKey = 'super-secret-key-12345';
+
+		const { code, output } = await runCli([
+			'start',
+			'--pipeline',
+			pipelinePath,
+			'--uri',
+			mockServer.uri,
+			'--apikey',
+			secretApiKey,
+		]);
+
+		expect(code).toBe(0);
+		expect(output).toContain('Token: MOCK-TASK-TOKEN-98765');
+		expect(output).toContain('Stop it with: rocketride stop --token MOCK-TASK-TOKEN-98765');
+		expect(output).not.toContain('[object Object]');
+		expect(output).not.toContain(secretApiKey);
+		expect(output).not.toContain('--apikey');
+	});
+
+	it('should output clean JSON with token and no credential leak in --json mode', async () => {
+		mockServer = await createMockStartServer();
+		const pipelinePath = writePipeline('start-json-project');
+		const secretApiKey = 'super-secret-json-key';
+
+		const { code, output } = await runCli([
+			'start',
+			'--pipeline',
+			pipelinePath,
+			'--json',
+			'--uri',
+			mockServer.uri,
+			'--apikey',
+			secretApiKey,
+		]);
+
+		expect(code).toBe(0);
+		expect(output).not.toContain(secretApiKey);
+		const parsed = JSON.parse(output);
+		expect(parsed).toEqual({ token: 'MOCK-TASK-TOKEN-98765' });
+	});
+
+	it('should accept positional pipeline argument for Python CLI compatibility', async () => {
+		mockServer = await createMockStartServer();
+		const pipelinePath = writePipeline('start-positional-project');
+
+		const { code, output } = await runCli([
+			'start',
+			pipelinePath,
+			'--uri',
+			mockServer.uri,
+			'--apikey',
+			'TEST',
+		]);
+
+		expect(code).toBe(0);
+		expect(output).toContain('Token: MOCK-TASK-TOKEN-98765');
+	});
+
+	it('should fail with actionable message when pipeline is omitted', async () => {
+		const { code, output } = await runCli(['start', '--uri', 'ws://127.0.0.1:9']);
+		expect(code).toBe(1);
+		expect(output).toContain('Pipeline file is required');
+	});
+
+	it('should accept valid wrapped {"pipeline": {...}} configuration file in start and upload', async () => {
+		mockServer = await createMockStartServer();
+		const wrappedFile = path.join(workDir, 'wrapped.pipe');
+		const flat = getEchoPipeline('wrapped-project');
+		fs.writeFileSync(wrappedFile, JSON.stringify({ pipeline: flat }), 'utf-8');
+
+		// Test start with wrapped pipeline
+		const startResult = await runCli([
+			'start',
+			'--pipeline',
+			wrappedFile,
+			'--uri',
+			mockServer.uri,
+			'--apikey',
+			'TEST',
+		]);
+		expect(startResult.code).toBe(0);
+		expect(startResult.output).toContain('Token: MOCK-TASK-TOKEN-98765');
+
+		// Test upload with wrapped pipeline
+		const uploadFile = path.join(workDir, 'upload.txt');
+		fs.writeFileSync(uploadFile, 'sample data', 'utf-8');
+		const uploadResult = await runCli([
+			'upload',
+			uploadFile,
+			'--pipeline',
+			wrappedFile,
+			'--uri',
+			mockServer.uri,
+			'--apikey',
+			'TEST',
+		]);
+		expect(uploadResult.code).toBe(0);
+		expect(uploadResult.output).toContain('Uploaded 1 of 1 file(s)');
+	});
+
+	it('should reject invalid JSON pipeline file with actionable error', async () => {
+		const badJsonFile = path.join(workDir, 'bad.pipe');
+		fs.writeFileSync(badJsonFile, '{ invalid json', 'utf-8');
+
+		const { code, output } = await runCli(['start', '--pipeline', badJsonFile]);
+		expect(code).toBe(1);
+		expect(output).toContain('Invalid JSON format in');
+	});
+
+	it('should reject wrapper whose contents are invalid or missing', async () => {
+		const nullWrapperFile = path.join(workDir, 'null-wrapper.pipe');
+		fs.writeFileSync(nullWrapperFile, JSON.stringify({ pipeline: null }), 'utf-8');
+
+		const { code, output } = await runCli(['start', '--pipeline', nullWrapperFile]);
+		expect(code).toBe(1);
+		expect(output).toContain('Invalid pipeline wrapper');
+		expect(output).toContain('wrapper contents are missing or invalid');
+	});
+
+	it('should reject pipeline without a valid source component', async () => {
+		const noSourceFile = path.join(workDir, 'no-source.pipe');
+		fs.writeFileSync(
+			noSourceFile,
+			JSON.stringify({
+				components: [
+					{
+						id: 'resp_1',
+						provider: 'response',
+						config: { mode: 'Sink' },
+					},
+				],
+			}),
+			'utf-8',
+		);
+
+		const { code, output } = await runCli(['start', '--pipeline', noSourceFile]);
+		expect(code).toBe(1);
+		expect(output).toContain('does not have a source component defined');
+	});
+});
+
 describe('CLI stop Integration Tests', () => {
 	const PIPELINE_TOKEN = 'TS-CLI-STOP';
 	const PROJECT_ID = '3c6f9b44-5d87-4a3b-ae69-4f1d8027b953';

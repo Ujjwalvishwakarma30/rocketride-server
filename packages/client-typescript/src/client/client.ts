@@ -695,7 +695,14 @@ export class RocketRideClient extends DAPClient {
 			return new LoginAttemptCancelledError(operation.cancellationReason);
 		}
 		if (operation.unexpectedDisconnectError) return operation.unexpectedDisconnectError;
-		return fallback instanceof Error ? fallback : new Error(String(fallback ?? 'Connection failed'));
+		if (fallback instanceof LoginAttemptCancelledError || fallback instanceof AuthenticationException || fallback instanceof ConnectionException) {
+			return fallback;
+		}
+		if (fallback instanceof TypeError || fallback instanceof RangeError || fallback instanceof SyntaxError) {
+			return fallback;
+		}
+		const message = fallback instanceof Error ? fallback.message : String(fallback ?? 'Connection failed');
+		return new ConnectionException({ message, cause: fallback });
 	}
 
 	private _assertCurrentOperation(operation: LoginLifecycleOperation): void {
@@ -863,6 +870,16 @@ export class RocketRideClient extends DAPClient {
 			this._rejectLifecycleOperation(operation, error);
 			if (error instanceof AuthenticationException && operation.priority === 'background' && this._isCurrentOperation(operation)) {
 				await this.onConnectError(error);
+			} else if (operation.priority === 'foreground' && this._persist && !(error instanceof AuthenticationException) && !(error instanceof LoginAttemptCancelledError) && this._isCurrentOperation(operation) && !operation.cancellationReason) {
+				try {
+					await this.onConnectError(error instanceof ConnectionException ? error : new ConnectionException({ message: (error as Error)?.message || String(error), cause: error }));
+				} catch (cbError) {
+					this.debugMessage(`onConnectError callback threw: ${cbError}`);
+				}
+				if (this._isCurrentOperation(operation) && !operation.cancellationReason && this._persist) {
+					this._currentReconnectDelay = Math.min(this._currentReconnectDelay + 250, 15_000);
+					this._scheduleReconnect(operation.generation);
+				}
 			}
 		}
 	}
@@ -1423,9 +1440,12 @@ export class RocketRideClient extends DAPClient {
 			const fileContent = await fsPromises.readFile(filepath, 'utf-8');
 			const parsed = JSON.parse(fileContent);
 			// .pipe files wrap the config in { "pipeline": { ... } } — unwrap if present
-			pipelineConfig = parsed.pipeline ?? parsed;
+			pipelineConfig = (parsed && typeof parsed === 'object' && 'pipeline' in parsed && parsed.pipeline) ? parsed.pipeline : parsed;
 		} else {
-			pipelineConfig = pipeline!;
+			const rawPipeline = pipeline!;
+			pipelineConfig = (rawPipeline && typeof rawPipeline === 'object' && 'pipeline' in rawPipeline && (rawPipeline as any).pipeline)
+				? (rawPipeline as any).pipeline
+				: rawPipeline;
 		}
 
 		// Create a deep copy of the pipeline config to avoid modifying the original

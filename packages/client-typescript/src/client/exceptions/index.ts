@@ -61,6 +61,9 @@ export class DAPException extends Error {
 		if (typeof code === 'string') this.code = code;
 		const hint = this.dapResult.hint;
 		if (typeof hint === 'string') this.hint = hint;
+		if (this.dapResult.cause !== undefined) {
+			(this as { cause?: unknown }).cause = this.dapResult.cause;
+		}
 	}
 }
 
