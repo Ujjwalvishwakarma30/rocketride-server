@@ -488,7 +488,7 @@ describe('CLI start and pipeline loading regression tests (Issue #2830)', () => 
 		}
 	});
 
-	function createMockStartServer(): Promise<{ uri: string; close: () => Promise<void> }> {
+	function createMockStartServer(onRequest?: (msg: Record<string, unknown>) => void): Promise<{ uri: string; close: () => Promise<void> }> {
 		return new Promise((resolve) => {
 			const server = http.createServer();
 			const wss = new WebSocketServer({ server });
@@ -501,6 +501,7 @@ describe('CLI start and pipeline loading regression tests (Issue #2830)', () => 
 					try {
 						const msg = JSON.parse(text);
 						if (msg.type === 'request') {
+							onRequest?.(msg);
 							if (msg.command === 'auth') {
 								ws.send(
 									JSON.stringify({
@@ -635,7 +636,13 @@ describe('CLI start and pipeline loading regression tests (Issue #2830)', () => 
 	});
 
 	it('should accept valid wrapped {"pipeline": {...}} configuration file in start and upload', async () => {
-		mockServer = await createMockStartServer();
+		let capturedExecutePipeline: Record<string, unknown> | null = null;
+		mockServer = await createMockStartServer((msg) => {
+			if (msg.command === 'execute' || msg.command === 'rrext_use') {
+				const args = msg.arguments as Record<string, unknown> | undefined;
+				capturedExecutePipeline = (args?.pipeline as Record<string, unknown>) ?? null;
+			}
+		});
 		const wrappedFile = path.join(workDir, 'wrapped.pipe');
 		const flat = getEchoPipeline('wrapped-project');
 		fs.writeFileSync(wrappedFile, JSON.stringify({ pipeline: flat }), 'utf-8');
@@ -652,6 +659,10 @@ describe('CLI start and pipeline loading regression tests (Issue #2830)', () => 
 		]);
 		expect(startResult.code).toBe(0);
 		expect(startResult.output).toContain('Token: MOCK-TASK-TOKEN-98765');
+		expect(capturedExecutePipeline).toBeDefined();
+		expect((capturedExecutePipeline as unknown as Record<string, unknown>).pipeline).toBeUndefined();
+		expect((capturedExecutePipeline as unknown as Record<string, unknown>).components).toBeDefined();
+		expect(Array.isArray((capturedExecutePipeline as unknown as Record<string, unknown>).components)).toBe(true);
 
 		// Test upload with wrapped pipeline
 		const uploadFile = path.join(workDir, 'upload.txt');
@@ -706,6 +717,28 @@ describe('CLI start and pipeline loading regression tests (Issue #2830)', () => 
 		);
 
 		const { code, output } = await runCli(['start', '--pipeline', noSourceFile]);
+		expect(code).toBe(1);
+		expect(output).toContain('does not have a source component defined');
+	});
+
+	it('should reject pipeline whose source ID does not reference any component', async () => {
+		const badSourceFile = path.join(workDir, 'bad-source.pipe');
+		fs.writeFileSync(
+			badSourceFile,
+			JSON.stringify({
+				source: 'non_existent_source_id',
+				components: [
+					{
+						id: 'resp_1',
+						provider: 'response',
+						config: { mode: 'Sink' },
+					},
+				],
+			}),
+			'utf-8',
+		);
+
+		const { code, output } = await runCli(['start', '--pipeline', badSourceFile]);
 		expect(code).toBe(1);
 		expect(output).toContain('does not have a source component defined');
 	});

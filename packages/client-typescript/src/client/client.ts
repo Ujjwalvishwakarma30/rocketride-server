@@ -1405,7 +1405,7 @@ export class RocketRideClient extends DAPClient {
 		options: {
 			token?: string;
 			filepath?: string;
-			pipeline?: PipelineConfig;
+			pipeline?: PipelineConfig | { pipeline: PipelineConfig };
 			source?: string;
 			threads?: number;
 			useExisting?: boolean;
@@ -1443,9 +1443,11 @@ export class RocketRideClient extends DAPClient {
 			pipelineConfig = (parsed && typeof parsed === 'object' && 'pipeline' in parsed && parsed.pipeline) ? parsed.pipeline : parsed;
 		} else {
 			const rawPipeline = pipeline!;
-			pipelineConfig = (rawPipeline && typeof rawPipeline === 'object' && 'pipeline' in rawPipeline && (rawPipeline as any).pipeline)
-				? (rawPipeline as any).pipeline
-				: rawPipeline;
+			if ('pipeline' in rawPipeline && rawPipeline.pipeline) {
+				pipelineConfig = rawPipeline.pipeline;
+			} else {
+				pipelineConfig = rawPipeline as PipelineConfig;
+			}
 		}
 
 		// Create a deep copy of the pipeline config to avoid modifying the original

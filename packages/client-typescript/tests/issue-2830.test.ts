@@ -287,7 +287,7 @@ describe('Issue #2830 — sendFiles([]) and use() unwrapping', () => {
 		});
 
 		const result = await client.use({
-			pipeline: wrappedPipeline as unknown as ReturnType<typeof getEchoPipeline>,
+			pipeline: wrappedPipeline,
 		});
 
 		expect(result.token).toBe('UNWRAPPED_TASK_TOKEN');

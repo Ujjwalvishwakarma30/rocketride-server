@@ -228,13 +228,16 @@ export function loadPipelineConfig(pipelineFile: string): PipelineConfig {
 	const rawConfig = config as unknown as Record<string, unknown>;
 	const components = Array.isArray(rawConfig.components) ? rawConfig.components : [];
 	const hasSourceProperty = typeof rawConfig.source === 'string' && rawConfig.source.trim().length > 0;
-	const hasSourceComponent = components.some((c: unknown) => {
+	const sourceMatchesComponent = hasSourceProperty && components.some((c: unknown) => {
+		return c && typeof c === 'object' && (c as Record<string, unknown>).id === rawConfig.source;
+	});
+	const hasImpliedSource = components.some((c: unknown) => {
 		if (!c || typeof c !== 'object') return false;
 		const comp = c as Record<string, unknown>;
 		const compConfig = comp.config as Record<string, unknown> | undefined;
-		return compConfig?.mode === 'Source' || (hasSourceProperty && comp.id === rawConfig.source);
+		return compConfig?.mode === 'Source';
 	});
-	if (!hasSourceProperty && !hasSourceComponent) {
+	if (!sourceMatchesComponent && !hasImpliedSource) {
 		throw new Error(`Pipeline in ${pipelineFile} does not have a source component defined`);
 	}
 	// .pipe files wrap the config in { "pipeline": { ... } } — unwrap it so
