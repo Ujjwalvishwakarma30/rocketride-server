@@ -690,11 +690,28 @@ export class RocketRideClient extends DAPClient {
 		return this._lifecycleOperation === operation && this._lifecycleGeneration === operation.generation;
 	}
 
+	/**
+	 * Resolves an operation failure to a terminal error, preserving specific
+	 * cancellation, authentication, and connection failure causes.
+	 *
+	 * When the operation already recorded an unexpected disconnect error without
+	 * a cause, the caught fallback error is preserved as its cause.
+	 *
+	 * @param operation - The lifecycle operation that failed.
+	 * @param fallback - The error caught during operation execution.
+	 * @returns The resolved terminal error.
+	 */
 	private _operationTerminalError(operation: LoginLifecycleOperation, fallback?: unknown): unknown {
 		if (operation.cancellationReason) {
 			return new LoginAttemptCancelledError(operation.cancellationReason);
 		}
-		if (operation.unexpectedDisconnectError) return operation.unexpectedDisconnectError;
+		if (operation.unexpectedDisconnectError) {
+			const recorded = operation.unexpectedDisconnectError;
+			if (recorded.cause === undefined && fallback !== undefined && fallback !== recorded) {
+				recorded.cause = fallback;
+			}
+			return recorded;
+		}
 		if (fallback instanceof LoginAttemptCancelledError || fallback instanceof AuthenticationException || fallback instanceof ConnectionException) {
 			return fallback;
 		}
@@ -735,6 +752,13 @@ export class RocketRideClient extends DAPClient {
 		return true;
 	}
 
+	/**
+	 * Records an unexpected transport disconnection on an active login operation.
+	 *
+	 * @param operation - The lifecycle operation encountering the disconnection.
+	 * @param reason - Optional description of why the connection was lost.
+	 * @returns The recorded ConnectionException, or undefined if the operation already settled.
+	 */
 	private _recordUnexpectedDisconnect(operation: LoginLifecycleOperation, reason?: string): ConnectionException | undefined {
 		if (operation.settled || operation.cancellationReason || operation.unexpectedDisconnectError) {
 			return operation.unexpectedDisconnectError;
@@ -1371,14 +1395,14 @@ export class RocketRideClient extends DAPClient {
 	 * that use the `{ "pipeline": { ... } }` wrapper format. If the file contains a top-level
 	 * `pipeline` key, the inner object is extracted; otherwise the file content is used as-is.
 	 *
-	 * When passing a `pipeline` object directly, provide a flat `PipelineConfig` with
-	 * `components`, `source`, and `project_id` at the top level — do NOT wrap it in
-	 * `{ pipeline: { ... } }`.
+	 * When passing a `pipeline` object directly, provide a `PipelineConfig` or a wrapped
+	 * `{ pipeline: PipelineConfig }` object. If the object contains a top-level `pipeline`
+	 * key, the inner configuration is automatically extracted.
 	 *
 	 * @param options - Pipeline execution options
 	 * @param options.token - Custom token for the pipeline (auto-generated if not provided)
 	 * @param options.filepath - Path to a `.pipe` or JSON file containing pipeline configuration (Node.js only)
-	 * @param options.pipeline - Flat PipelineConfig object (alternative to filepath)
+	 * @param options.pipeline - PipelineConfig object or wrapped { pipeline: PipelineConfig } (alternative to filepath)
 	 * @param options.source - Override pipeline source
 	 * @param options.threads - Number of threads for execution (default: 1)
 	 * @param options.useExisting - Use existing pipeline instance

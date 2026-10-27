@@ -296,4 +296,31 @@ describe('Issue #2830 — sendFiles([]) and use() unwrapping', () => {
 		expect((sentPipelineArg as Record<string, unknown>).pipeline).toBeUndefined();
 		expect((sentPipelineArg as Record<string, unknown>).source).toBe('webhook_1');
 	});
+
+	it('should preserve fallback error as cause in _operationTerminalError when unexpectedDisconnectError has no cause', () => {
+		const clientInstance = new RocketRideClient({ uri: 'ws://127.0.0.1:5565' });
+		const unexpectedError = new ConnectionException({ message: 'Connection lost' });
+		const operation = {
+			unexpectedDisconnectError: unexpectedError,
+		};
+		const fallback = new Error('WebSocket closed abnormal closure 1006');
+		const result = (clientInstance as unknown as { _operationTerminalError: (op: unknown, fb?: unknown) => unknown })._operationTerminalError(operation, fallback);
+
+		expect(result).toBe(unexpectedError);
+		expect(unexpectedError.cause).toBe(fallback);
+	});
+
+	it('should not overwrite an existing cause on unexpectedDisconnectError in _operationTerminalError', () => {
+		const clientInstance = new RocketRideClient({ uri: 'ws://127.0.0.1:5565' });
+		const originalCause = new Error('Original cause');
+		const unexpectedError = new ConnectionException({ message: 'Connection lost', cause: originalCause });
+		const operation = {
+			unexpectedDisconnectError: unexpectedError,
+		};
+		const fallback = new Error('Later fallback');
+		const result = (clientInstance as unknown as { _operationTerminalError: (op: unknown, fb?: unknown) => unknown })._operationTerminalError(operation, fallback);
+
+		expect(result).toBe(unexpectedError);
+		expect(unexpectedError.cause).toBe(originalCause);
+	});
 });

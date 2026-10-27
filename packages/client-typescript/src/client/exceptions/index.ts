@@ -49,6 +49,11 @@ export class DAPException extends Error {
 	 */
 	public readonly hint?: string;
 
+	/**
+	 * Underlying error cause, when provided.
+	 */
+	public cause?: unknown;
+
 	constructor(dapResult: Record<string, unknown>) {
 		const errorMessage = String(dapResult.message || 'Unknown DAP error');
 		super(errorMessage);
@@ -62,7 +67,7 @@ export class DAPException extends Error {
 		const hint = this.dapResult.hint;
 		if (typeof hint === 'string') this.hint = hint;
 		if (this.dapResult.cause !== undefined) {
-			(this as { cause?: unknown }).cause = this.dapResult.cause;
+			this.cause = this.dapResult.cause;
 		}
 	}
 }
