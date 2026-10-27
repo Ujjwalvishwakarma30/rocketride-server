@@ -871,12 +871,14 @@ export class RocketRideClient extends DAPClient {
 			if (error instanceof AuthenticationException && operation.priority === 'background' && this._isCurrentOperation(operation)) {
 				await this.onConnectError(error);
 			} else if (operation.priority === 'foreground' && this._persist && !(error instanceof AuthenticationException) && !(error instanceof LoginAttemptCancelledError) && this._isCurrentOperation(operation) && !operation.cancellationReason) {
+				this._clearReconnectTimer();
 				try {
 					await this.onConnectError(error instanceof ConnectionException ? error : new ConnectionException({ message: (error as Error)?.message || String(error), cause: error }));
 				} catch (cbError) {
 					this.debugMessage(`onConnectError callback threw: ${cbError}`);
 				}
 				if (this._isCurrentOperation(operation) && !operation.cancellationReason && this._persist) {
+					this._clearReconnectTimer();
 					this._currentReconnectDelay = Math.min(this._currentReconnectDelay + 250, 15_000);
 					this._scheduleReconnect(operation.generation);
 				}
@@ -2063,10 +2065,10 @@ export class RocketRideClient extends DAPClient {
 			this._desiredState = 'detached';
 			return;
 		}
-		// A failed background login is retried by its promise handler only after
+		// A failed login (foreground or background) is retried only after
 		// onConnectError completes and the backoff advances. Scheduling here as
 		// well would race that callback and duplicate the current delay.
-		if (operation?.priority === 'background' && !operation.accepted && operation.unexpectedDisconnectError) return;
+		if (operation && !operation.accepted && operation.unexpectedDisconnectError) return;
 		this._scheduleReconnect();
 	}
 
